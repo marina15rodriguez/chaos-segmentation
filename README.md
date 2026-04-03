@@ -93,7 +93,7 @@ Kidneys performed well out of the box. Liver and spleen were the weakest organs.
 Spleen struggled because it is the smallest organ — fewer pixels means the uniform
 weight ×5 was not enough to force the model to learn its boundaries.
 
-### v2 — Per-organ class weights + stronger augmentation
+### v2 — Per-organ class weights + stronger augmentation (failed)
 Two changes motivated by the v1 results:
 
 1. **Per-organ class weights**: instead of a single weight for all foreground organs,
@@ -106,6 +106,36 @@ Two changes motivated by the v1 results:
 2. **Stronger augmentation**: with only 20 patients the model sees limited spatial
    variety. Added vertical flip, increased rotation from ±10° to ±15°, and random
    scale/crop (zoom 80–100%) to simulate different FOV and patient positioning.
+
+**Result — worse across all organs:**
+
+| Organ        | Dice   |
+|--------------|--------|
+| Liver        | 0.6907 |
+| Right kidney | 0.8932 |
+| Left kidney  | 0.7884 |
+| Spleen       | 0.5420 |
+| **Mean**     | **0.7286** |
+
+Why it failed: the very high spleen weight (10×) pushed the loss to focus almost
+exclusively on spleen pixels during early training, making it harder for the model
+to learn the other organs simultaneously. The additional augmentations (vertical flip,
+scale/crop) introduced too much spatial distortion for such a small dataset — with
+only 14 training patients, the model didn't have enough examples to generalise across
+the new transformations without overfitting.
+
+### v3 — ResNet50 encoder (revert augmentation + weights to v1)
+Since both v2 changes hurt performance, they were reverted to v1. The only modification
+is upgrading the encoder from **ResNet34 to ResNet50**.
+
+**Why ResNet50?** ResNet34 uses basic residual blocks (two 3×3 convolutions each).
+ResNet50 uses bottleneck blocks (1×1 → 3×3 → 1×1 convolutions), giving it:
+- ~25M parameters vs ~21M in ResNet34 — more capacity to learn subtle texture differences
+- Deeper feature hierarchy — better at distinguishing low-contrast boundaries like
+  the liver edge against surrounding tissue and the small spleen
+
+This gives the model more representational power without changing the training dynamics
+(same loss, same augmentation, same learning rates).
 
 ## Key ML Concepts
 
