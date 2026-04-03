@@ -5,8 +5,14 @@ from MRI scans, trained on the CHAOS dataset.
 
 ## Task
 
-Multi-class segmentation of abdominal organs from T2SPIR MRI slices in DICOM format.
-Each pixel is assigned one of 5 classes:
+We have 20 MRI scans of healthy abdomens (T2SPIR sequence). Each scan is a 3D volume
+stored as a series of 2D DICOM slices — think of it as a stack of cross-sectional
+images through the abdomen, one slice per file. For each scan, we also have one PNG
+mask per slice, where each pixel's intensity encodes which organ (if any) is at that
+location.
+
+The goal: train a model that, given a new MRI slice it has never seen, correctly
+predicts which organ each pixel belongs to.
 
 | Class | Organ        | Mask intensity |
 |-------|--------------|----------------|
@@ -32,42 +38,142 @@ data/
         Ground/       IMG-0002-000XX.png
 ```
 
-## Architecture
+## Data Pipeline (`dataset.py`)
 
-- **Encoder**: ResNet34 pretrained on ImageNet
-- **Decoder**: U-Net decoder with skip connections
-- **Output**: 5-channel logits → softmax → argmax class per pixel
-- **Input**: MRI slice normalised per-slice to [0, 255], repeated 3× for RGB
+**Loading DICOMs**: each `.dcm` file is a 2D greyscale image. Unlike CT scans (which
+use a standardised scale called Hounsfield Units where water is always 0 HU and air
+is always -1000 HU), MRI pixel values have no fixed physical meaning — they depend on
+the scanner settings and the patient. We therefore normalise each slice independently
+to [0, 255] so all slices are on the same scale before feeding them to the model.
 
-## Training
+**Loading masks**: the PNG files store organ labels as raw pixel intensities
+{0, 63, 126, 189, 252}. These arbitrary values have no meaning to PyTorch's loss
+function. We remap them to contiguous integers {0, 1, 2, 3, 4} — one index per class
+— which is the format CrossEntropyLoss expects.
 
-| Setting         | Value                                    |
-|-----------------|------------------------------------------|
-| Loss            | CrossEntropy (w=5 for organs) + multi-class Dice |
-| Optimiser       | Adam, differential LRs                   |
-| Encoder LR      | 5e-5                                     |
-| Decoder LR      | 1e-3                                     |
-| Scheduler       | CosineAnnealingLR                        |
-| Batch size      | 8                                        |
-| Image size      | 256 × 256                                |
-| Split           | Patient-level 70/15/15                   |
+**Patient-level split**: we have 20 patients × ~30 slices each = ~600 slices total.
+If we split randomly by slice, the same patient could appear in both train and
+validation — the model would be evaluated on slices of patients it already saw during
+training, making the validation score artificially high. Instead we split by patient:
+14 train / 3 val / 3 test. All slices from a patient always go to the same set.
+This is called patient-level split and it prevents **data leakage**.
 
-Run training on Kaggle:
-```python
-!git clone https://github.com/marina15rodriguez/chaos-segmentation.git
-%cd chaos-segmentation
-!pip install -q -r requirements.txt
+**Augmentation**: during training we randomly flip and rotate the image and mask
+together — the exact same transformation is applied to both so they stay aligned.
+If we only flipped the image but not the mask, the model would receive contradictory
+supervision (liver on the left in the image but labelled on the right in the mask).
+We never apply colour jitter to the mask — that is an image-only transform.
 
-!python src/train.py \
-    --data-dir /kaggle/input/.../CHAOS_Train_Sets/Train_Sets \
-    --epochs 50 \
-    --batch-size 8 \
-    --output-dir /kaggle/working/results
-```
+**What the model receives**: image tensor `[3, 256, 256]` (the greyscale slice
+repeated 3 times to match the 3-channel RGB format that the pretrained ImageNet
+encoder expects) and mask tensor `[256, 256]` with integer class labels.
+
+## Architecture (`model.py`)
+
+A **U-Net** with a pretrained **ResNet34 encoder**.
+
+**U-Net** is an encoder-decoder architecture with skip connections:
+- **Encoder** (downsampling path): applies convolutions and pooling to progressively
+  reduce the spatial resolution (e.g. 256×256 → 128×128 → 64×64 → …) while
+  increasing the number of feature channels. Each layer learns increasingly abstract
+  representations — early layers detect edges and textures, deep layers detect
+  organ-level shapes.
+- **Decoder** (upsampling path): progressively restores the spatial resolution back
+  to the original image size, producing a prediction map at full resolution.
+- **Skip connections**: at each resolution level, the encoder's feature map is
+  concatenated to the decoder's feature map. This is why the architecture is called
+  U-Net (it looks like a U). Without skip connections, fine spatial detail (exact
+  organ boundaries) would be lost in the deep encoder layers and the decoder could
+  not recover it.
+
+**Why pretrained ResNet34?** Training a U-Net from scratch on 20 patients would
+overfit immediately — there is not enough data for the model to learn meaningful
+features from random initialisation. ResNet34 was pretrained on ImageNet (1.2M
+images across 1000 categories) so it already knows how to detect edges, textures
+and shapes. We reuse these features and only need the training data to teach the
+decoder how to map them to organ labels. This is called **transfer learning**.
+
+**Differential learning rates**: we use two different learning rates for the two
+parts of the model. The encoder gets LR=5e-5 (small) because its pretrained ImageNet
+weights are already good — large updates would destroy them. The decoder gets LR=1e-3
+(larger) because it is randomly initialised and needs to learn faster. This technique
+is called **differential learning rates**.
+
+**Output**: `[5, 256, 256]` — 5 channels (one per class) of raw scores called
+**logits**. No activation is applied here — the loss function handles that internally.
+
+## Training (`train.py`)
+
+**CrossEntropyLoss**: takes the 5-channel logits and the integer mask. Internally it
+applies **softmax** to the logits, which turns the raw scores into probabilities that
+sum to 1 across the 5 classes for each pixel. For example, a pixel might become
+[0.02, 0.71, 0.10, 0.12, 0.05] — 71% liver, 12% left kidney, etc. The loss then
+penalises how much probability was assigned to the wrong class. The key property of
+softmax is that the 5 class probabilities always sum to 1, so the classes
+**compete** against each other — making the liver score higher automatically lowers
+all other scores for that pixel. This correctly models the fact that each pixel
+belongs to exactly one organ.
+
+**Why not BCE (Binary Cross Entropy)?** BCE treats each output channel as an
+independent yes/no question. A pixel could score 80% liver AND 80% spleen
+simultaneously, which is physically impossible and gives contradictory gradients
+during training. CE with softmax prevents this.
+
+**Dice loss**: the Dice coefficient measures the overlap between prediction and ground
+truth: `Dice = 2 × |pred ∩ target| / (|pred| + |target|)`. It is 1 when prediction
+and ground truth perfectly overlap and 0 when they don't overlap at all. We add a
+Dice loss term (1 - Dice) to the CE loss so the model directly optimises the metric
+we care about. Without Dice loss, CE alone can be satisfied by correctly classifying
+the many background pixels without ever learning the organ boundaries precisely.
+
+**Class weights [1, 5, 5, 5, 5]**: organs occupy far fewer pixels than background
+in a typical MRI slice — most of the image is background tissue. Without weighting,
+the CE loss is dominated by background pixels and the model learns to predict
+all-background (which scores low loss but is useless). We multiply the loss
+contribution of each organ pixel by 5, forcing the model to pay more attention to
+getting the organ regions right.
+
+**CosineAnnealingLR**: the learning rate follows a cosine curve from 1e-3 down to
+near zero across 50 epochs. This ensures the model takes large steps early (fast
+learning) and small steps later (fine-tuning). We chose this over ReduceLROnPlateau
+(which halves the LR whenever val Dice stops improving) because in earlier experiments
+ReduceLROnPlateau collapsed the LR to ~1e-7 within 30 epochs before the model had
+finished learning, causing val Dice to stay at 0.
+
+## Evaluation (`evaluate.py`)
+
+**Dice coefficient**: for each organ separately, we compute
+`Dice = 2 × (pred ∩ target) / (pred + target)` on the test set. We only include
+slices where the organ actually appears in the ground truth — on a slice where the
+liver is not visible, a correct all-background prediction would score near 0 Dice
+(numerator = 0, denominator ≈ small predicted area), which would unfairly penalise
+a correct prediction.
+
+**TTA (Test-Time Augmentation)**: "inference" means running the trained model on new
+data to get predictions — as opposed to "training" where the model is updating its
+weights. During inference the model's weights are frozen; we are just using it as a
+function that maps an input slice to a segmentation mask.
+
+TTA improves predictions by running inference multiple times with slightly different
+versions of the same input and averaging the results. Here we run inference twice:
+once on the original slice, and once on the horizontally flipped slice. The flipped
+slice's prediction is flipped back to the original orientation, then we average the
+two **softmax probability maps** (before taking argmax). Averaging makes the
+probabilities more reliable — if the model is uncertain about a pixel on the boundary
+of the liver, one run might say 60% liver and the other 70% liver; averaging gives
+65% and argmax still picks liver. Near boundaries where the model is genuinely
+uncertain, the two runs can reinforce each other and produce a smoother, more
+confident boundary.
+
+**Colour grid**: the integer prediction map is visualised as a colour overlay on top
+of the original greyscale MRI slice — liver=red, right kidney=green, left
+kidney=blue, spleen=orange — so you can visually inspect where the model is correct
+and where it fails.
 
 ## Local API
 
-A FastAPI web interface lets you upload a DICOM series and visualise the organ segmentation predictions interactively.
+A FastAPI web interface lets you upload a DICOM series and visualise the organ
+segmentation predictions interactively.
 
 **Setup:**
 ```powershell
@@ -92,23 +198,14 @@ Open `http://127.0.0.1:8000` in your browser.
 3. Click **Run segmentation**
 4. The interface shows the 8 most informative slices with colour-coded organ overlays and lists the detected organs
 
-The API loads the v1 checkpoint (`results/best_model.pth`) at startup. Make sure the checkpoint is downloaded from Kaggle and placed at that path before starting the server.
-
-## Evaluation
-
-```bash
-python src/evaluate.py \
-    --checkpoint results/best_model.pth \
-    --data-dir /path/to/CHAOS_Train_Sets/Train_Sets \
-    --output-dir results
-```
-
-Outputs per-organ Dice and IoU on the test set, plus a colour-coded prediction grid.
+The API loads the v1 checkpoint (`results/best_model.pth`) at startup. Make sure the
+checkpoint is downloaded from Kaggle and placed at that path before starting the server.
 
 ## Model Iterations
 
 ### v1 — Baseline
-Uniform foreground class weight ×5, horizontal flip + rotation ±10° augmentation.
+ResNet34 encoder, CrossEntropy + Dice loss, uniform foreground class weight ×5,
+horizontal flip + rotation ±10° augmentation.
 
 | Organ        | Dice   |
 |--------------|--------|
@@ -276,27 +373,6 @@ slightly, likely because EfficientNet-B4 features are tuned differently than Res
 **Best overall**: v1 (highest mean Dice 0.740, most stable across all organs).
 **Best liver**: v5 (0.761 — 2.5D context and SE blocks help large organ boundaries).
 **Spleen**: consistently ~0.56–0.58 across all versions — a dataset size ceiling.
-
-## Key ML Concepts
-
-- **Intensity → class mapping**: mask PNGs use raw intensities {63, 126, 189, 252}
-  which are remapped to contiguous class indices {1, 2, 3, 4} for CrossEntropyLoss.
-- **CrossEntropyLoss**: enforces that each pixel belongs to exactly one class via
-  softmax — correct for multi-class, unlike BCE.
-- **Per-organ class weights**: each organ is weighted individually based on size and
-  difficulty. Small organs (spleen) need higher weights so the loss penalises missing
-  them more strongly than missing a large, easy-to-find organ.
-- **Per-slice normalisation**: MRI has no standard intensity scale (unlike CT HU),
-  so each slice is normalised independently to [0, 255].
-- **Patient-level split**: all slices from a patient go to the same split,
-  preventing data leakage between train and val.
-- **2.5D input**: instead of repeating the greyscale channel 3×, slices `[n-1, n, n+1]`
-  are stacked as 3 channels. The model sees spatial continuity between slices without
-  the memory cost of full 3D convolutions.
-- **EfficientNet-B4 encoder**: squeeze-and-excitation blocks recalibrate channel
-  responses per feature map, amplifying informative channels for small structures.
-- **TTA**: horizontal flip — averages softmax distributions before argmax
-  for smoother organ boundaries.
 
 ## Limitations
 
