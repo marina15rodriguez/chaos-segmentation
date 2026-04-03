@@ -24,7 +24,19 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dataset import load_dicom_slice, NUM_CLASSES, ORGAN_NAMES, IMAGENET_MEAN, IMAGENET_STD
-from model import create_model
+import segmentation_models_pytorch as smp
+import torch.nn as nn
+
+
+def _create_model_resnet34(num_classes: int = NUM_CLASSES) -> nn.Module:
+    """Create U-Net with ResNet34 encoder — matches the v1 checkpoint."""
+    return smp.Unet(
+        encoder_name    = "resnet34",
+        encoder_weights = None,       # weights loaded from checkpoint
+        in_channels     = 3,
+        classes         = num_classes,
+        activation      = None,
+    )
 
 # ---------------------------------------------------------------------------
 # Colour palette (same as evaluate.py)
@@ -50,8 +62,8 @@ def load_model(checkpoint_path: str) -> None:
     """Load the model checkpoint once at startup."""
     global _model, _device
     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _model  = create_model(num_classes=NUM_CLASSES).to(_device)
-    ckpt    = torch.load(checkpoint_path, map_location=_device)
+    _model  = _create_model_resnet34(num_classes=NUM_CLASSES).to(_device)
+    ckpt    = torch.load(checkpoint_path, map_location=_device, weights_only=False)
     _model.load_state_dict(ckpt["state_dict"])
     _model.eval()
     print(f"Model loaded from {checkpoint_path} on {_device}")
@@ -63,23 +75,15 @@ def load_model(checkpoint_path: str) -> None:
 def preprocess_slice(
     dcm_paths: list[Path], slice_idx: int
 ) -> torch.Tensor:
-    """Load slice n with neighbours n-1, n+1 and return normalised tensor [1,3,H,W]."""
-    n       = slice_idx
-    n_total = len(dcm_paths)
-    prev_idx = max(0, n - 1)
-    next_idx = min(n_total - 1, n + 1)
+    """Load a single slice and return normalised tensor [1,3,H,W].
 
-    def to_tensor(path):
-        arr = load_dicom_slice(path)
-        img = Image.fromarray(arr, mode="L")
-        img = TF.resize(img, [256, 256], interpolation=Image.BILINEAR)
-        return TF.to_tensor(img)   # [1, H, W]
-
-    ch_prev = to_tensor(dcm_paths[prev_idx])
-    ch_curr = to_tensor(dcm_paths[n])
-    ch_next = to_tensor(dcm_paths[next_idx])
-
-    image = torch.cat([ch_prev, ch_curr, ch_next], dim=0)   # [3, H, W]
+    Uses greyscale repeated 3× to match the v1 (ResNet34) checkpoint.
+    """
+    arr   = load_dicom_slice(dcm_paths[slice_idx])
+    img   = Image.fromarray(arr, mode="L")
+    img   = TF.resize(img, [256, 256], interpolation=Image.BILINEAR)
+    image = TF.to_tensor(img)                                # [1, H, W]
+    image = image.repeat(3, 1, 1)                            # [3, H, W]
     image = TF.normalize(image, IMAGENET_MEAN, IMAGENET_STD)
     return image.unsqueeze(0)                                # [1, 3, H, W]
 
