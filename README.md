@@ -76,13 +76,46 @@ python src/evaluate.py \
 
 Outputs per-organ Dice and IoU on the test set, plus a colour-coded prediction grid.
 
+## Model Iterations
+
+### v1 — Baseline
+Uniform foreground class weight ×5, horizontal flip + rotation ±10° augmentation.
+
+| Organ        | Dice   |
+|--------------|--------|
+| Liver        | 0.7008 |
+| Right kidney | 0.8966 |
+| Left kidney  | 0.8017 |
+| Spleen       | 0.5609 |
+| **Mean**     | **0.7400** |
+
+Kidneys performed well out of the box. Liver and spleen were the weakest organs.
+Spleen struggled because it is the smallest organ — fewer pixels means the uniform
+weight ×5 was not enough to force the model to learn its boundaries.
+
+### v2 — Per-organ class weights + stronger augmentation
+Two changes motivated by the v1 results:
+
+1. **Per-organ class weights**: instead of a single weight for all foreground organs,
+   each organ gets a weight proportional to its difficulty and size:
+   - Background: 1.0
+   - Liver: 8.0 — large but low-contrast, easy to miss boundaries
+   - Right/left kidney: 5.0 — already well-segmented, keep moderate weight
+   - Spleen: 10.0 — smallest organ, needs the strongest signal
+
+2. **Stronger augmentation**: with only 20 patients the model sees limited spatial
+   variety. Added vertical flip, increased rotation from ±10° to ±15°, and random
+   scale/crop (zoom 80–100%) to simulate different FOV and patient positioning.
+
 ## Key ML Concepts
 
 - **Intensity → class mapping**: mask PNGs use raw intensities {63, 126, 189, 252}
   which are remapped to contiguous class indices {1, 2, 3, 4} for CrossEntropyLoss.
 - **CrossEntropyLoss**: enforces that each pixel belongs to exactly one class via
   softmax — correct for multi-class, unlike BCE.
-- **Class weights**: foreground organs upweighted ×5 to counteract background dominance.
+- **Per-organ class weights**: each organ is weighted individually based on size and
+  difficulty. Small organs (spleen) need higher weights so the loss penalises missing
+  them more strongly than missing a large, easy-to-find organ.
 - **Per-slice normalisation**: MRI has no standard intensity scale (unlike CT HU),
   so each slice is normalised independently to [0, 255].
 - **Patient-level split**: all slices from a patient go to the same split,
