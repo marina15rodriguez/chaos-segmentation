@@ -93,7 +93,8 @@ def collect_samples(data_root: Path) -> list[dict]:
     """Build a list of (slice, mask) samples.
 
     Each sample dict contains:
-        'dcm_path'   : Path to .dcm file
+        'dcm_paths'  : list of all DCM paths in this series (for 2.5D context)
+        'slice_idx'  : index of this slice within dcm_paths
         'mask_path'  : Path to matching PNG mask
         'patient_id' : str, for patient-level splitting
     """
@@ -109,7 +110,7 @@ def collect_samples(data_root: Path) -> list[dict]:
         if not t2_dir.exists():
             continue
 
-        dicom_dir = t2_dir / "DICOM_anon"
+        dicom_dir  = t2_dir / "DICOM_anon"
         ground_dir = t2_dir / "Ground"
 
         if not dicom_dir.exists() or not ground_dir.exists():
@@ -118,10 +119,11 @@ def collect_samples(data_root: Path) -> list[dict]:
         dcm_files  = sorted(dicom_dir.glob("*.dcm"))
         mask_files = sorted(ground_dir.glob("*.png"))
 
-        # Pair each DICOM with its corresponding mask by position
-        for dcm_path, mask_path in zip(dcm_files, mask_files):
+        # Store full series list per sample for 2.5D neighbour access
+        for slice_idx, mask_path in enumerate(mask_files):
             samples.append({
-                "dcm_path":   dcm_path,
+                "dcm_paths":  dcm_files,       # all slices in this series
+                "slice_idx":  slice_idx,
                 "mask_path":  mask_path,
                 "patient_id": patient_id,
             })
@@ -135,9 +137,13 @@ def collect_samples(data_root: Path) -> list[dict]:
 class CHAOSDataset(Dataset):
     """Loads (image, mask) pairs for multi-organ MRI segmentation.
 
+    Uses 2.5D input: stacks slices [n-1, n, n+1] as 3 channels so the model
+    sees spatial context between adjacent slices. For boundary slices (first/last),
+    the missing neighbour is replaced by repeating the edge slice.
+
     Each __getitem__ returns:
-        image : FloatTensor [3, H, W]  — normalised MRI slice (greyscale × 3)
-        mask  : LongTensor  [H, W]     — integer class labels {0..4}
+        image : FloatTensor [3, H, W]  — 3 consecutive MRI slices as channels
+        mask  : LongTensor  [H, W]     — integer class labels {0..4} for slice n
     """
 
     def __init__(self, samples: list[dict], augment: bool = False):
@@ -148,23 +154,38 @@ class CHAOSDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int):
-        item = self.samples[idx]
+        item      = self.samples[idx]
+        dcm_paths = item["dcm_paths"]
+        n         = item["slice_idx"]
+        n_total   = len(dcm_paths)
 
-        # Load DICOM → PIL greyscale
-        array = load_dicom_slice(item["dcm_path"])
-        image = Image.fromarray(array, mode="L")
+        # 2.5D: load slices n-1, n, n+1 (clamp at boundaries)
+        prev_idx = max(0, n - 1)
+        next_idx = min(n_total - 1, n + 1)
+
+        slice_prev = load_dicom_slice(dcm_paths[prev_idx])
+        slice_curr = load_dicom_slice(dcm_paths[n])
+        slice_next = load_dicom_slice(dcm_paths[next_idx])
+
+        # Stack as PIL images for joint transforms (use current slice as reference)
+        img_prev = Image.fromarray(slice_prev, mode="L")
+        img_curr = Image.fromarray(slice_curr, mode="L")
+        img_next = Image.fromarray(slice_next, mode="L")
 
         # Load PNG mask → class indices → PIL
         mask_array = load_mask(item["mask_path"])
         mask = Image.fromarray(mask_array, mode="L")
 
-        # Joint spatial transforms
-        image, mask = self._joint_transform(image, mask)
+        # Joint spatial transforms — apply same transform to all 3 slices + mask
+        img_prev, img_curr, img_next, mask = self._joint_transform(
+            img_prev, img_curr, img_next, mask)
 
-        # Image: greyscale → 3 channels → normalise
-        image = TF.to_tensor(image)                               # [1, H, W]
-        image = image.repeat(3, 1, 1)                             # [3, H, W]
-        image = TF.normalize(image, IMAGENET_MEAN, IMAGENET_STD)
+        # Stack 3 slices as channels → [3, H, W]
+        ch_prev = TF.to_tensor(img_prev)   # [1, H, W]
+        ch_curr = TF.to_tensor(img_curr)
+        ch_next = TF.to_tensor(img_next)
+        image   = torch.cat([ch_prev, ch_curr, ch_next], dim=0)  # [3, H, W]
+        image   = TF.normalize(image, IMAGENET_MEAN, IMAGENET_STD)
 
         # Mask: integer class labels [H, W]
         mask = torch.from_numpy(np.array(mask)).long()            # [H, W] {0..4}
@@ -172,29 +193,52 @@ class CHAOSDataset(Dataset):
         return image, mask
 
     def _joint_transform(
-        self, image: Image.Image, mask: Image.Image
-    ) -> tuple[Image.Image, Image.Image]:
-        """Apply identical spatial transforms to image and mask."""
+        self,
+        img_prev: Image.Image,
+        img_curr: Image.Image,
+        img_next: Image.Image,
+        mask:     Image.Image,
+    ) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image]:
+        """Apply identical spatial transforms to all 3 slices and the mask."""
 
-        # Always resize
-        image = TF.resize(image, [IMAGE_SIZE, IMAGE_SIZE], interpolation=Image.BILINEAR)
-        mask  = TF.resize(mask,  [IMAGE_SIZE, IMAGE_SIZE], interpolation=Image.NEAREST)
+        def resize_bilinear(img):
+            return TF.resize(img, [IMAGE_SIZE, IMAGE_SIZE], interpolation=Image.BILINEAR)
+
+        def resize_nearest(img):
+            return TF.resize(img, [IMAGE_SIZE, IMAGE_SIZE], interpolation=Image.NEAREST)
+
+        img_prev = resize_bilinear(img_prev)
+        img_curr = resize_bilinear(img_curr)
+        img_next = resize_bilinear(img_next)
+        mask     = resize_nearest(mask)
 
         if self.augment:
-            # Random horizontal flip
+            # Random horizontal flip — same decision for all
             if random.random() > 0.5:
-                image = TF.hflip(image)
-                mask  = TF.hflip(mask)
+                img_prev = TF.hflip(img_prev)
+                img_curr = TF.hflip(img_curr)
+                img_next = TF.hflip(img_next)
+                mask     = TF.hflip(mask)
 
-            # Random rotation ±10 degrees
-            angle = random.uniform(-10, 10)
-            image = TF.rotate(image, angle, interpolation=Image.BILINEAR)
-            mask  = TF.rotate(mask,  angle, interpolation=Image.NEAREST)
+            # Random rotation — same angle for all
+            angle    = random.uniform(-10, 10)
+            img_prev = TF.rotate(img_prev, angle, interpolation=Image.BILINEAR)
+            img_curr = TF.rotate(img_curr, angle, interpolation=Image.BILINEAR)
+            img_next = TF.rotate(img_next, angle, interpolation=Image.BILINEAR)
+            mask     = TF.rotate(mask,     angle, interpolation=Image.NEAREST)
 
-            # Brightness/contrast jitter on image only
-            image = T.ColorJitter(brightness=0.2, contrast=0.2)(image)
+            # Brightness/contrast jitter — apply same params to all 3 slices
+            jitter = T.ColorJitter(brightness=0.2, contrast=0.2)
+            params = jitter.get_params(
+                jitter.brightness, jitter.contrast, jitter.saturation, jitter.hue)
+            img_prev = TF.adjust_brightness(img_prev, params[1])
+            img_curr = TF.adjust_brightness(img_curr, params[1])
+            img_next = TF.adjust_brightness(img_next, params[1])
+            img_prev = TF.adjust_contrast(img_prev, params[2])
+            img_curr = TF.adjust_contrast(img_curr, params[2])
+            img_next = TF.adjust_contrast(img_next, params[2])
 
-        return image, mask
+        return img_prev, img_curr, img_next, mask
 
 
 # ---------------------------------------------------------------------------

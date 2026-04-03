@@ -178,7 +178,7 @@ of overfitting. Pure Dice loss without the regularising effect of CrossEntropy i
 unstable on a dataset of only 20 patients. The model memorised the training patients
 rather than learning generalisable organ boundaries.
 
-### Final model — v1 (ResNet34 + CE+Dice + uniform weights ×5)
+### Interim summary after v1–v4
 
 After four iterations, v1 achieved the best test generalisation. The spleen score
 (0.56) is a dataset size limitation — with only 3 test patients, a single difficult
@@ -191,6 +191,32 @@ stable training signal across all experiments.
 | v2 | Per-organ weights + stronger augmentation | 0.7286 |
 | v3 | ResNet50 encoder | 0.7330 |
 | v4 | Dice-only loss | 0.7145 |
+
+### v5 — 2.5D input + EfficientNet-B4 encoder
+
+Two architectural improvements targeting the root causes of poor spleen/liver scores:
+
+**2.5D input (3 consecutive slices as channels)**
+Previously each slice was segmented independently, with no information about
+neighbouring slices. Organs like the spleen are only visible in a subset of slices
+and their boundaries are easier to locate when the model can see what the slice above
+and below look like. Instead of repeating the greyscale 3×, we stack slices
+`[n-1, n, n+1]` as the 3 input channels. For the first and last slice, the missing
+neighbour is replaced by repeating the edge slice. This is called 2.5D because it is
+a 2D model that sees limited 3D context — a good compromise between full 3D
+segmentation (much more memory and data) and pure 2D.
+
+**EfficientNet-B4 encoder (replaces ResNet34)**
+ResNet uses plain residual blocks. EfficientNet-B4 uses:
+- **Compound scaling**: simultaneously scales network depth, width and input
+  resolution in a balanced way, giving better accuracy per parameter.
+- **Squeeze-and-Excitation (SE) blocks**: after each convolutional block, SE
+  recalibrates channel-wise feature responses by learning which channels are most
+  informative. This is especially helpful for small structures like the spleen,
+  where specific feature channels need to be amplified over background noise.
+
+EfficientNet-B4 has ~19M parameters vs ~21M for ResNet34 but consistently
+outperforms it on fine-grained segmentation tasks due to the SE blocks.
 
 ## Key ML Concepts
 
@@ -205,5 +231,22 @@ stable training signal across all experiments.
   so each slice is normalised independently to [0, 255].
 - **Patient-level split**: all slices from a patient go to the same split,
   preventing data leakage between train and val.
+- **2.5D input**: instead of repeating the greyscale channel 3×, slices `[n-1, n, n+1]`
+  are stacked as 3 channels. The model sees spatial continuity between slices without
+  the memory cost of full 3D convolutions.
+- **EfficientNet-B4 encoder**: squeeze-and-excitation blocks recalibrate channel
+  responses per feature map, amplifying informative channels for small structures.
 - **TTA**: horizontal flip — averages softmax distributions before argmax
   for smoother organ boundaries.
+
+## Limitations
+
+- **Dataset size**: only 20 patients (T2SPIR MRI). With 3 test patients, a single
+  difficult case heavily influences per-organ scores — especially for the spleen
+  which is the smallest organ and most sensitive to patient variation.
+  Adding the T1DUAL sequences (same patients, different MRI contrast) or the CT
+  subset would increase training diversity.
+- **2D/2.5D only**: full 3D segmentation (processing the entire volume as a 3D tensor)
+  would give better results but requires significantly more GPU memory and data.
+- **T2SPIR only**: the model is trained on one MRI sequence. Performance may degrade
+  on T1-weighted or other MRI contrasts without fine-tuning.
