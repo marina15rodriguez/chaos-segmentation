@@ -202,11 +202,7 @@ def main() -> None:
     total, trainable = count_parameters(model)
     print(f"Parameters — total: {total:,} | trainable: {trainable:,}")
 
-    # Upweight foreground organs to counteract background dominance
-    class_weights = torch.ones(NUM_CLASSES, device=device)
-    class_weights[1:] = 5.0
-
-    criterion = CombinedLoss(class_weights=class_weights)
+    criterion = MultiClassDiceLoss()
     encoder_params, decoder_params = get_parameter_groups(model)
     optimiser = torch.optim.Adam([
         {"params": encoder_params, "lr": args.encoder_lr},
