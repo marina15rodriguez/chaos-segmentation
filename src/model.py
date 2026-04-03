@@ -20,7 +20,7 @@ def create_model(num_classes: int = 5) -> nn.Module:
         nn.Module ready for multi-class segmentation
     """
     model = smp.Unet(
-        encoder_name    = "resnet50",
+        encoder_name    = "resnet34",
         encoder_weights = "imagenet",
         in_channels     = 3,          # greyscale repeated 3× to match ImageNet input
         classes         = num_classes,

@@ -163,6 +163,35 @@ now directly maximises the Dice overlap per organ — there is no shortcut of ge
 easy background pixels right. This should force the model to learn the spleen and
 liver boundaries more precisely.
 
+**Result — overfitting:**
+
+| Organ        | Dice   |
+|--------------|--------|
+| Liver        | 0.6748 |
+| Right kidney | 0.8729 |
+| Left kidney  | 0.7437 |
+| Spleen       | 0.5668 |
+| **Mean**     | **0.7145** |
+
+Val Dice reached 0.876 during training but test Dice dropped to 0.71 — a clear sign
+of overfitting. Pure Dice loss without the regularising effect of CrossEntropy is too
+unstable on a dataset of only 20 patients. The model memorised the training patients
+rather than learning generalisable organ boundaries.
+
+### Final model — v1 (ResNet34 + CE+Dice + uniform weights ×5)
+
+After four iterations, v1 achieved the best test generalisation. The spleen score
+(0.56) is a dataset size limitation — with only 3 test patients, a single difficult
+spleen case has a large impact on the mean. The combined CE+Dice loss proved the most
+stable training signal across all experiments.
+
+| Version | Change | Mean Dice |
+|---------|--------|-----------|
+| v1 | ResNet34, CE+Dice, weights ×5 | **0.7400** |
+| v2 | Per-organ weights + stronger augmentation | 0.7286 |
+| v3 | ResNet50 encoder | 0.7330 |
+| v4 | Dice-only loss | 0.7145 |
+
 ## Key ML Concepts
 
 - **Intensity → class mapping**: mask PNGs use raw intensities {63, 126, 189, 252}
