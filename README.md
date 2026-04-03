@@ -137,6 +137,32 @@ ResNet50 uses bottleneck blocks (1×1 → 3×3 → 1×1 convolutions), giving it
 This gives the model more representational power without changing the training dynamics
 (same loss, same augmentation, same learning rates).
 
+**Result — liver improved, spleen still low:**
+
+| Organ        | Dice   |
+|--------------|--------|
+| Liver        | 0.7365 |
+| Right kidney | 0.8919 |
+| Left kidney  | 0.7464 |
+| Spleen       | 0.5571 |
+| **Mean**     | **0.7330** |
+
+Liver improved (0.70 → 0.74) but left kidney regressed slightly and spleen barely
+moved. The deeper encoder helped with large organs but not with the spleen — the
+bottleneck is not model capacity but the loss function's inability to focus on small
+organ overlap directly.
+
+### v4 — Dice-only loss (drop CrossEntropy)
+The combined CrossEntropy + Dice loss lets the model optimise pixel-level accuracy
+(via CE) at the expense of overlap (via Dice). For small organs like the spleen,
+CE can be satisfied by correctly classifying the many background pixels, even if the
+spleen boundary is wrong.
+
+Switching to **pure Dice loss** removes the CE term entirely. Every training step
+now directly maximises the Dice overlap per organ — there is no shortcut of getting
+easy background pixels right. This should force the model to learn the spleen and
+liver boundaries more precisely.
+
 ## Key ML Concepts
 
 - **Intensity → class mapping**: mask PNGs use raw intensities {63, 126, 189, 252}
