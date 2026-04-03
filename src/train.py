@@ -202,10 +202,9 @@ def main() -> None:
     total, trainable = count_parameters(model)
     print(f"Parameters — total: {total:,} | trainable: {trainable:,}")
 
-    # Per-organ class weights tuned to organ size and difficulty:
-    # liver (large but low contrast) and spleen (small) get higher weights
-    class_weights = torch.tensor([1.0, 8.0, 5.0, 5.0, 10.0], device=device)
-    # indices:                     bg   liv  rkid  lkid  spl
+    # Upweight foreground organs to counteract background dominance
+    class_weights = torch.ones(NUM_CLASSES, device=device)
+    class_weights[1:] = 5.0
 
     criterion = CombinedLoss(class_weights=class_weights)
     encoder_params, decoder_params = get_parameter_groups(model)
