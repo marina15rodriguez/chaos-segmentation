@@ -65,6 +65,35 @@ Run training on Kaggle:
     --output-dir /kaggle/working/results
 ```
 
+## Local API
+
+A FastAPI web interface lets you upload a DICOM series and visualise the organ segmentation predictions interactively.
+
+**Setup:**
+```powershell
+cd C:\Users\marin\projects\chaos-segmentation
+python -m pip install fastapi uvicorn python-multipart segmentation-models-pytorch pydicom torch torchvision Pillow numpy
+```
+
+**Run:**
+```powershell
+cd api
+python -m uvicorn main:app --port 8000
+```
+
+Open `http://127.0.0.1:8000` in your browser.
+
+**Usage:**
+1. Zip a T2SPIR DICOM series folder:
+   ```powershell
+   Compress-Archive -Path "path\to\MR\<patient_id>\T2SPIR\DICOM_anon\*" -DestinationPath "series.zip"
+   ```
+2. Drag and drop `series.zip` onto the interface
+3. Click **Run segmentation**
+4. The interface shows the 8 most informative slices with colour-coded organ overlays and lists the detected organs
+
+The API loads the v1 checkpoint (`results/best_model.pth`) at startup. Make sure the checkpoint is downloaded from Kaggle and placed at that path before starting the server.
+
 ## Evaluation
 
 ```bash
