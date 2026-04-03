@@ -218,6 +218,36 @@ ResNet uses plain residual blocks. EfficientNet-B4 uses:
 EfficientNet-B4 has ~19M parameters vs ~21M for ResNet34 but consistently
 outperforms it on fine-grained segmentation tasks due to the SE blocks.
 
+**Result — liver improved, spleen still at ceiling:**
+
+| Organ        | Dice   |
+|--------------|--------|
+| Liver        | 0.7614 |
+| Right kidney | 0.8609 |
+| Left kidney  | 0.7328 |
+| Spleen       | 0.5765 |
+| **Mean**     | **0.7329** |
+
+Liver improved significantly (0.70 → 0.76) thanks to the 2.5D context and better
+encoder features. However the spleen remains near 0.57 across all versions. This
+confirms the spleen score is a data limitation — with only 3 test patients, a single
+difficult spleen appearance dominates the score. The right kidney also regressed
+slightly, likely because EfficientNet-B4 features are tuned differently than ResNet34.
+
+### Final comparison
+
+| Version | Key change | Liver | R.Kidney | L.Kidney | Spleen | Mean |
+|---------|-----------|-------|----------|----------|--------|------|
+| v1 | ResNet34, CE+Dice | 0.701 | 0.897 | 0.802 | 0.561 | **0.740** |
+| v2 | Per-organ weights + augmentation | 0.691 | 0.893 | 0.788 | 0.542 | 0.729 |
+| v3 | ResNet50 encoder | 0.737 | 0.892 | 0.746 | 0.557 | 0.733 |
+| v4 | Dice-only loss | 0.675 | 0.873 | 0.744 | 0.567 | 0.715 |
+| v5 | 2.5D + EfficientNet-B4 | 0.761 | 0.861 | 0.733 | 0.577 | 0.733 |
+
+**Best overall**: v1 (highest mean Dice 0.740, most stable across all organs).
+**Best liver**: v5 (0.761 — 2.5D context and SE blocks help large organ boundaries).
+**Spleen**: consistently ~0.56–0.58 across all versions — a dataset size ceiling.
+
 ## Key ML Concepts
 
 - **Intensity → class mapping**: mask PNGs use raw intensities {63, 126, 189, 252}
