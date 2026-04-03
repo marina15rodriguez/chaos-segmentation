@@ -186,10 +186,27 @@ class CHAOSDataset(Dataset):
                 image = TF.hflip(image)
                 mask  = TF.hflip(mask)
 
-            # Random rotation ±10 degrees
-            angle = random.uniform(-10, 10)
+            # Random vertical flip
+            if random.random() > 0.5:
+                image = TF.vflip(image)
+                mask  = TF.vflip(mask)
+
+            # Random rotation ±15 degrees (increased from ±10)
+            angle = random.uniform(-15, 15)
             image = TF.rotate(image, angle, interpolation=Image.BILINEAR)
             mask  = TF.rotate(mask,  angle, interpolation=Image.NEAREST)
+
+            # Random scale/crop: zoom in 80-100% then resize back
+            if random.random() > 0.5:
+                scale = random.uniform(0.8, 1.0)
+                h, w  = image.size[1], image.size[0]
+                new_h, new_w = int(h * scale), int(w * scale)
+                i = random.randint(0, h - new_h)
+                j = random.randint(0, w - new_w)
+                image = TF.crop(image, i, j, new_h, new_w)
+                mask  = TF.crop(mask,  i, j, new_h, new_w)
+                image = TF.resize(image, [IMAGE_SIZE, IMAGE_SIZE], interpolation=Image.BILINEAR)
+                mask  = TF.resize(mask,  [IMAGE_SIZE, IMAGE_SIZE], interpolation=Image.NEAREST)
 
             # Brightness/contrast jitter on image only
             image = T.ColorJitter(brightness=0.2, contrast=0.2)(image)
