@@ -170,6 +170,27 @@ of the original greyscale MRI slice — liver=red, right kidney=green, left
 kidney=blue, spleen=orange — so you can visually inspect where the model is correct
 and where it fails.
 
+## Docker (recommended)
+
+The easiest way to run the API — no Python environment or checkpoint setup needed.
+
+**Pull and run:**
+```powershell
+docker pull marina15rodriguez/chaos-segmentation:v1
+docker run -p 8000:8000 marina15rodriguez/chaos-segmentation:v1
+```
+
+Then open `http://localhost:8000` in your browser.
+
+The image includes the trained model checkpoint and all dependencies. It runs on CPU only (no GPU required).
+
+If port 8000 is already in use, map to a different port:
+```powershell
+docker run -p 8001:8000 marina15rodriguez/chaos-segmentation:v1
+```
+
+---
+
 ## Local API
 
 A FastAPI web interface lets you upload a DICOM series and visualise the organ
